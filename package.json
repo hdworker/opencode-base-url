@@ -1,0 +1,21 @@
+{
+  "name": "opencode-cowork-proxy",
+  "version": "2.0.0",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260504.1",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.87.0"
+  },
+  "license": "MIT",
+  "description": "Bidirectional AI API translation gateway for Cloudflare Workers. Anthropic↔OpenAI format bridge.",
+  "dependencies": {
+    "hono": "^4.12.17"
+  }
+}
