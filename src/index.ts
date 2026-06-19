@@ -6,6 +6,7 @@ import { formatOpenAIToAnthropic as toAnthropicResponse } from './translate/resp
 import { formatAnthropicToOpenAI as toOpenAIResponse } from './translate/response/anthropic-to-openai';
 import { streamOpenAIToAnthropic } from './translate/stream/openai-to-anthropic';
 import { streamAnthropicToOpenAI } from './translate/stream/anthropic-to-openai';
+import { logRequest, logError } from './logger';
 
 const GO_UPSTREAM = "https://opencode.ai/zen/go/v1";
 const ZEN_UPSTREAM = "https://opencode.ai/zen/v1";
@@ -76,102 +77,206 @@ async function handleRequest(request: Request): Promise<Response> {
   const upstream = getUpstream(request, route.upstream);
   const fmt = upstreamFormat(request);
 
+  console.log(`[${new Date().toISOString()}] ${request.method} ${request.url} -> route: ${route.path}, upstream: ${upstream}, format: ${fmt}`);
+
   // Anthropic → OpenAI (for Claude Desktop/Cowork → any OpenAI API)
   if (route.path === '/v1/messages' && request.method === 'POST') {
       const key = extractApiKey(request.headers);
       const err = validateApiKey(key);
-      if (err) return authErrorResponse(err);
+      if (err) {
+        console.log(`[AUTH] Rejected: ${JSON.stringify(err.body)}`);
+        const resp = authErrorResponse(err);
+        await logRequest(request, resp);
+        return resp;
+      }
 
       if (fmt === "openai") {
         const req = await request.json();
-        if (hasImages(req)) req.model = VISION_MODEL;
+        console.log(`[TRANSLATE] Anthropic→OpenAI, model: ${req.model}, stream: ${req.stream}`);
+        if (hasImages(req)) {
+          console.log(`[IMAGE] Detected image, overriding model to ${VISION_MODEL}`);
+          req.model = VISION_MODEL;
+        }
         const openaiReq = formatAnthropicToOpenAI(req);
-        const res = await fetch(`${upstream}/chat/completions`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${key}`,
-          },
-          body: JSON.stringify(openaiReq),
-        });
-        if (!res.ok) return upstreamErrorResponse(res, await res.text());
+        let res: Response;
+        try {
+          res = await fetch(`${upstream}/chat/completions`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${key}`,
+            },
+            body: JSON.stringify(openaiReq),
+          });
+        } catch (err: any) {
+          const cause = err.cause?.message || err.message || 'Unknown error';
+          console.error(`[TRANSLATE ERROR] Anthropic→OpenAI: ${cause}`);
+          await logError(err, request).catch(() => {});
+          return new Response(JSON.stringify({
+            error: { message: `Upstream connection failed: ${cause}`, type: 'upstream_error' },
+          }), { status: 502, headers: { "Content-Type": "application/json" } });
+        }
+        if (!res.ok) {
+          console.log(`[UPSTREAM ERROR] ${res.status} ${res.statusText}`);
+          const resp = upstreamErrorResponse(res, await res.text());
+          await logRequest(request, resp);
+          return resp;
+        }
 
         if (openaiReq.stream) {
-          return new Response(streamOpenAIToAnthropic(res.body as ReadableStream, openaiReq.model), {
+          console.log(`[STREAM] OpenAI→Anthropic streaming`);
+          const resp = new Response(streamOpenAIToAnthropic(res.body as ReadableStream, openaiReq.model), {
             headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" },
           });
+          await logRequest(request, resp);
+          return resp;
         }
         const data: any = await res.json();
-        return new Response(JSON.stringify(toAnthropicResponse(data, openaiReq.model)), {
+        console.log(`[RESPONSE] Non-streaming, model: ${openaiReq.model}`);
+        const resp = new Response(JSON.stringify(toAnthropicResponse(data, openaiReq.model)), {
           headers: { "Content-Type": "application/json" },
         });
+        await logRequest(request, resp);
+        return resp;
       }
 
       // Pass-through to Anthropic upstream
-      const res = await fetch(`${upstream}/v1/messages`, {
-        method: "POST",
-        headers: anthropicHeaders(request, key!),
-        body: await request.text(),
-      });
-      return res;
-  }
-
-  // OpenAI → Anthropic (or pass-through)
-  if (route.path === '/v1/chat/completions' && request.method === 'POST') {
-      const key = extractApiKey(request.headers);
-      const err = validateApiKey(key);
-      if (err) return authErrorResponse(err);
-
-      if (fmt === "anthropic") {
-        const req = await request.json();
-        const anthReq = formatOpenAIToAnthropic(req);
+      console.log(`[PASSTHROUGH] Anthropic→Anthropic`);
+      const anthBody = await request.text();
+      try {
         const res = await fetch(`${upstream}/v1/messages`, {
           method: "POST",
           headers: anthropicHeaders(request, key!),
-          body: JSON.stringify(anthReq),
+          body: anthBody,
         });
-        if (!res.ok) return upstreamErrorResponse(res, await res.text());
+        await logRequest(request, res);
+        return res;
+      } catch (err: any) {
+        const cause = err.cause?.message || err.message || 'Unknown error';
+        console.error(`[PASSTHROUGH ERROR] Anthropic→Anthropic: ${cause}`);
+        await logError(err, request).catch(() => {});
+        return new Response(JSON.stringify({
+          error: { message: `Upstream connection failed: ${cause}`, type: 'upstream_error' },
+        }), { status: 502, headers: { "Content-Type": "application/json" } });
+      }
+  }
+
+  // OpenAI → Anthropic (or pass-through)
+  const isChatCompletions = route.path === '/v1/chat/completions' || route.path === '/chat/completions';
+  if (isChatCompletions && request.method === 'POST') {
+      const key = extractApiKey(request.headers);
+      const err = validateApiKey(key);
+      if (err) {
+        console.log(`[AUTH] Rejected: ${JSON.stringify(err.body)}`);
+        const resp = authErrorResponse(err);
+        await logRequest(request, resp);
+        return resp;
+      }
+
+      if (fmt === "anthropic") {
+        const req = await request.json();
+        console.log(`[TRANSLATE] OpenAI→Anthropic, model: ${req.model}, stream: ${req.stream}`);
+        const anthReq = formatOpenAIToAnthropic(req);
+        let res: Response;
+        try {
+          res = await fetch(`${upstream}/v1/messages`, {
+            method: "POST",
+            headers: anthropicHeaders(request, key!),
+            body: JSON.stringify(anthReq),
+          });
+        } catch (err: any) {
+          const cause = err.cause?.message || err.message || 'Unknown error';
+          console.error(`[TRANSLATE ERROR] OpenAI→Anthropic: ${cause}`);
+          await logError(err, request).catch(() => {});
+          return new Response(JSON.stringify({
+            error: { message: `Upstream connection failed: ${cause}`, type: 'upstream_error' },
+          }), { status: 502, headers: { "Content-Type": "application/json" } });
+        }
+        if (!res.ok) {
+          console.log(`[UPSTREAM ERROR] ${res.status} ${res.statusText}`);
+          const resp = upstreamErrorResponse(res, await res.text());
+          await logRequest(request, resp);
+          return resp;
+        }
 
         if (anthReq.stream) {
-          return new Response(streamAnthropicToOpenAI(res.body as ReadableStream, anthReq.model), {
+          console.log(`[STREAM] Anthropic→OpenAI streaming`);
+          const resp = new Response(streamAnthropicToOpenAI(res.body as ReadableStream, anthReq.model), {
             headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" },
           });
+          await logRequest(request, resp);
+          return resp;
         }
         const data: any = await res.json();
-        return new Response(JSON.stringify(toOpenAIResponse(data, anthReq.model)), {
+        console.log(`[RESPONSE] Non-streaming, model: ${anthReq.model}`);
+        const resp = new Response(JSON.stringify(toOpenAIResponse(data, anthReq.model)), {
           headers: { "Content-Type": "application/json" },
         });
+        await logRequest(request, resp);
+        return resp;
       }
 
       // Pass-through to OpenAI upstream
-      const res = await fetch(`${upstream}/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-        body: await request.text(),
-      });
-      return res;
+      console.log(`[PASSTHROUGH] OpenAI→OpenAI`);
+      const textBody = await request.text();
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const res = await fetch(`${upstream}/chat/completions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+            body: textBody,
+          });
+          await logRequest(request, res);
+          return res;
+        } catch (err: any) {
+          const cause = err.cause?.message || err.message || 'Unknown error';
+          console.error(`[PASSTHROUGH ERROR] attempt ${attempt}/2: ${cause}`);
+          await logError(err, request).catch(() => {});
+          if (attempt === 2) {
+            return new Response(JSON.stringify({
+              error: { message: `Upstream connection failed: ${cause}`, type: 'upstream_error' },
+            }), { status: 502, headers: { "Content-Type": "application/json" } });
+          }
+          await new Promise(r => setTimeout(r, 1000 * attempt));
+        }
+      }
   }
 
   // Model discovery
-  if (route.path === '/v1/models' && request.method === 'GET') {
+  const isModels = route.path === '/v1/models' || route.path === '/models';
+  if (isModels && request.method === 'GET') {
       const key = extractApiKey(request.headers);
       const err = validateApiKey(key);
-      if (err) return authErrorResponse(err);
+      if (err) {
+        console.log(`[AUTH] Rejected: ${JSON.stringify(err.body)}`);
+        const resp = authErrorResponse(err);
+        await logRequest(request, resp);
+        return resp;
+      }
 
+      console.log(`[MODELS] Discovering models, format: ${fmt}`);
       const res = fmt === "anthropic"
         ? await fetch(`${upstream}/v1/models`, {
             method: "GET",
-            headers: anthropicHeaders(request, key),
+            headers: anthropicHeaders(request, key!),
           })
         : await fetch(`${upstream}/models`, {
             method: "GET",
             headers: { "Authorization": `Bearer ${key}` },
       });
-      if (!res.ok) return upstreamErrorResponse(res, await res.text());
-      return new Response(await res.text(), { headers: { "Content-Type": "application/json" } });
+      if (!res.ok) {
+        console.log(`[UPSTREAM ERROR] ${res.status} ${res.statusText}`);
+        const resp = upstreamErrorResponse(res, await res.text());
+        await logRequest(request, resp);
+        return resp;
+      }
+      const resp = new Response(await res.text(), { headers: { "Content-Type": "application/json" } });
+      await logRequest(request, resp);
+      return resp;
   }
 
-  return new Response(JSON.stringify({
+  console.log(`[404] No route matched for path: ${route.path}`);
+  const resp = new Response(JSON.stringify({
     name: "opencode-cowork-proxy",
     upstream,
     routes: {
@@ -187,9 +292,12 @@ async function handleRequest(request: Request): Promise<Response> {
     headers: { "Content-Type": "application/json" },
     status: route.path === '/' ? 200 : 404,
   });
+  await logRequest(request, resp);
+  return resp;
 }
 
 const app = new Hono();
 app.all('*', (c) => handleRequest(c.req.raw));
 
+export { app };
 export default app;

@@ -200,8 +200,17 @@ export function streamOpenAIToAnthropic(openaiStream: ReadableStream, model: str
 
       try {
         while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
+          let chunkDone: boolean;
+          let chunkValue: Uint8Array | undefined;
+          try {
+            const { done, value } = await reader.read();
+            chunkDone = done;
+            chunkValue = value;
+          } catch (err) {
+            console.error(`[STREAM ERROR] OpenAI→Anthropic read error: ${err}`);
+            break;
+          }
+          if (chunkDone) {
             if (buffer.trim()) {
               const lines = buffer.split('\n');
               for (const line of lines) {
@@ -219,7 +228,7 @@ export function streamOpenAIToAnthropic(openaiStream: ReadableStream, model: str
             break;
           }
 
-          const chunk = decoder.decode(value, { stream: true });
+          const chunk = decoder.decode(chunkValue!, { stream: true });
           buffer += chunk;
 
           const lines = buffer.split('\n');

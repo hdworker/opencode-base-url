@@ -116,10 +116,19 @@ export function streamAnthropicToOpenAI(anthropicStream: ReadableStream, model: 
 
       try {
         while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+          let chunkDone: boolean;
+          let chunkValue: Uint8Array | undefined;
+          try {
+            const { done, value } = await reader.read();
+            chunkDone = done;
+            chunkValue = value;
+          } catch (err) {
+            console.error(`[STREAM ERROR] Anthropic→OpenAI read error: ${err}`);
+            break;
+          }
+          if (chunkDone) break;
 
-          const chunk = decoder.decode(value, { stream: true });
+          const chunk = decoder.decode(chunkValue!, { stream: true });
           buffer += chunk;
 
           // Process complete SSE frames (delimited by double newline)
