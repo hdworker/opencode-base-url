@@ -1,18 +1,7 @@
-# OpenCode Cowork Proxy Worker
+# OpenCode Proxy
+Проект на базе Opencode Cowork Proxy, с убранным Cloudfire worker, и работающем просто как прямой прокси, предоставляющий доступ приложениям по BASE_URL к Opencode-моделям.
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cucoleadan/opencode-cowork-proxy)
-
-This project lets Claude use OpenCode Go models, and some OpenCode Zen models.
-
-Claude normally speaks the Anthropic API format. OpenCode Go mostly speaks OpenAI-compatible API format. This small Cloudflare Worker sits in the middle and translates between them.
-
-I covered how to set this up in Claude in [How to Use Claude Code for Free with OpenCode](https://vibestacklab.substack.com/p/how-to-use-claude-code-for-free-with).
-
-### Image / Vision Support
-
-When you attach an image in Claude Code and send it through this proxy, the request is automatically routed to **Qwen3.5 Plus** (`qwen3.5-plus`) — a vision-capable model on OpenCode Go. This happens transparently: the proxy detects image blocks in your request, translates them to OpenAI's image format, and overrides the model to Qwen3.5 Plus so the model can actually see the image.
-
-No configuration needed — it just works as long as you have an OpenCode Go subscription.
+Далее текст оригинального README.md.
 
 ## Set Up In Claude
 
@@ -299,34 +288,6 @@ The gateway handles:
 When translating Anthropic to OpenAI, the gateway injects a `prompt_cache_key` derived from a hash of the system prompt. This keeps requests with the same system prompt routed to the same backend node when the upstream supports OpenAI-style prefix caching.
 
 Cache hit tokens from OpenAI-compatible usage metadata are mapped back to Anthropic's `cache_read_input_tokens` field.
-
-## Development
-
-```bash
-npm install
-npm test
-npm run deploy -- --dry-run
-```
-
-Project structure:
-
-```text
-src/
-├── index.ts                          Main Worker router and auth gate
-├── auth.ts                           API key extraction and validation
-├── cache.ts                          Prompt cache key utilities
-└── translate/
-    ├── request/                      Request translators
-    ├── response/                     Response translators
-    └── stream/                       SSE stream translators
-test/
-├── auth.test.ts
-├── cache.test.ts
-├── index.test.ts
-├── request.test.ts
-├── response.test.ts
-└── stream.test.ts
-```
 
 ## License
 
